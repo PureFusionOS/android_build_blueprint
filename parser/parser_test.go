@@ -32,16 +32,19 @@ func mkpos(offset, line, column int) scanner.Position {
 var validParseTestCases = []struct {
 	input    string
 	defs     []Definition
-	comments []Comment
+	comments []*CommentGroup
 }{
 	{`
 		foo {}
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(8, 2, 8),
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(8, 2, 8),
+				},
 			},
 		},
 		nil,
@@ -54,17 +57,20 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(27, 4, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"name", mkpos(12, 3, 4)},
-						Pos:  mkpos(16, 3, 8),
-						Value: Value{
-							Type:        String,
-							Pos:         mkpos(18, 3, 10),
-							StringValue: "abc",
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(27, 4, 3),
+					Properties: []*Property{
+						{
+							Name:     "name",
+							NamePos:  mkpos(12, 3, 4),
+							ColonPos: mkpos(16, 3, 8),
+							Value: &String{
+								LiteralPos: mkpos(18, 3, 10),
+								Value:      "abc",
+							},
 						},
 					},
 				},
@@ -80,17 +86,20 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(28, 4, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"isGood", mkpos(12, 3, 4)},
-						Pos:  mkpos(18, 3, 10),
-						Value: Value{
-							Type:      Bool,
-							Pos:       mkpos(20, 3, 12),
-							BoolValue: true,
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(28, 4, 3),
+					Properties: []*Property{
+						{
+							Name:     "isGood",
+							NamePos:  mkpos(12, 3, 4),
+							ColonPos: mkpos(18, 3, 10),
+							Value: &Bool{
+								LiteralPos: mkpos(20, 3, 12),
+								Value:      true,
+							},
 						},
 					},
 				},
@@ -107,42 +116,40 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(67, 5, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"stuff", mkpos(12, 3, 4)},
-						Pos:  mkpos(17, 3, 9),
-						Value: Value{
-							Type:   List,
-							Pos:    mkpos(19, 3, 11),
-							EndPos: mkpos(63, 4, 19),
-							ListValue: []Value{
-								Value{
-									Type:        String,
-									Pos:         mkpos(20, 3, 12),
-									StringValue: "asdf",
-								},
-								Value{
-									Type:        String,
-									Pos:         mkpos(28, 3, 20),
-									StringValue: "jkl;",
-								},
-								Value{
-									Type:        String,
-									Pos:         mkpos(36, 3, 28),
-									StringValue: "qwert",
-								},
-								Value{
-									Type:        String,
-									Pos:         mkpos(49, 4, 5),
-									StringValue: "uiop",
-								},
-								Value{
-									Type:        String,
-									Pos:         mkpos(57, 4, 13),
-									StringValue: "bnm,",
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(67, 5, 3),
+					Properties: []*Property{
+						{
+							Name:     "stuff",
+							NamePos:  mkpos(12, 3, 4),
+							ColonPos: mkpos(17, 3, 9),
+							Value: &List{
+								LBracePos: mkpos(19, 3, 11),
+								RBracePos: mkpos(63, 4, 19),
+								Values: []Expression{
+									&String{
+										LiteralPos: mkpos(20, 3, 12),
+										Value:      "asdf",
+									},
+									&String{
+										LiteralPos: mkpos(28, 3, 20),
+										Value:      "jkl;",
+									},
+									&String{
+										LiteralPos: mkpos(36, 3, 28),
+										Value:      "qwert",
+									},
+									&String{
+										LiteralPos: mkpos(49, 4, 5),
+										Value:      "uiop",
+									},
+									&String{
+										LiteralPos: mkpos(57, 4, 13),
+										Value:      "bnm,",
+									},
 								},
 							},
 						},
@@ -163,34 +170,37 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(62, 7, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"stuff", mkpos(12, 3, 4)},
-						Pos:  mkpos(17, 3, 9),
-						Value: Value{
-							Type:   Map,
-							Pos:    mkpos(19, 3, 11),
-							EndPos: mkpos(58, 6, 4),
-							MapValue: []*Property{
-								{
-									Name: Ident{"isGood", mkpos(25, 4, 5)},
-									Pos:  mkpos(31, 4, 11),
-									Value: Value{
-										Type:      Bool,
-										Pos:       mkpos(33, 4, 13),
-										BoolValue: true,
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(62, 7, 3),
+					Properties: []*Property{
+						{
+							Name:     "stuff",
+							NamePos:  mkpos(12, 3, 4),
+							ColonPos: mkpos(17, 3, 9),
+							Value: &Map{
+								LBracePos: mkpos(19, 3, 11),
+								RBracePos: mkpos(58, 6, 4),
+								Properties: []*Property{
+									{
+										Name:     "isGood",
+										NamePos:  mkpos(25, 4, 5),
+										ColonPos: mkpos(31, 4, 11),
+										Value: &Bool{
+											LiteralPos: mkpos(33, 4, 13),
+											Value:      true,
+										},
 									},
-								},
-								{
-									Name: Ident{"name", mkpos(43, 5, 5)},
-									Pos:  mkpos(47, 5, 9),
-									Value: Value{
-										Type:        String,
-										Pos:         mkpos(49, 5, 11),
-										StringValue: "bar",
+									{
+										Name:     "name",
+										NamePos:  mkpos(43, 5, 5),
+										ColonPos: mkpos(47, 5, 9),
+										Value: &String{
+											LiteralPos: mkpos(49, 5, 11),
+											Value:      "bar",
+										},
 									},
 								},
 							},
@@ -204,41 +214,64 @@ var validParseTestCases = []struct {
 
 	{`
 		// comment1
-		foo {
+		foo /* test */ {
 			// comment2
 			isGood: true,  // comment3
 		}
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(17, 3, 3)},
-				LbracePos: mkpos(21, 3, 7),
-				RbracePos: mkpos(70, 6, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"isGood", mkpos(41, 5, 4)},
-						Pos:  mkpos(47, 5, 10),
-						Value: Value{
-							Type:      Bool,
-							Pos:       mkpos(49, 5, 12),
-							BoolValue: true,
+				Type:    "foo",
+				TypePos: mkpos(17, 3, 3),
+				Map: Map{
+					LBracePos: mkpos(32, 3, 18),
+					RBracePos: mkpos(81, 6, 3),
+					Properties: []*Property{
+						{
+							Name:     "isGood",
+							NamePos:  mkpos(52, 5, 4),
+							ColonPos: mkpos(58, 5, 10),
+							Value: &Bool{
+								LiteralPos: mkpos(60, 5, 12),
+								Value:      true,
+							},
 						},
 					},
 				},
 			},
 		},
-		[]Comment{
-			Comment{
-				Comment: []string{"// comment1"},
-				Pos:     mkpos(3, 2, 3),
+		[]*CommentGroup{
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"// comment1"},
+						Slash:   mkpos(3, 2, 3),
+					},
+				},
 			},
-			Comment{
-				Comment: []string{"// comment2"},
-				Pos:     mkpos(26, 4, 4),
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"/* test */"},
+						Slash:   mkpos(21, 3, 7),
+					},
+				},
 			},
-			Comment{
-				Comment: []string{"// comment3"},
-				Pos:     mkpos(56, 5, 19),
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"// comment2"},
+						Slash:   mkpos(37, 4, 4),
+					},
+				},
+			},
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"// comment3"},
+						Slash:   mkpos(67, 5, 19),
+					},
+				},
 			},
 		},
 	},
@@ -254,33 +287,39 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Module{
-				Type:      Ident{"foo", mkpos(3, 2, 3)},
-				LbracePos: mkpos(7, 2, 7),
-				RbracePos: mkpos(27, 4, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"name", mkpos(12, 3, 4)},
-						Pos:  mkpos(16, 3, 8),
-						Value: Value{
-							Type:        String,
-							Pos:         mkpos(18, 3, 10),
-							StringValue: "abc",
+				Type:    "foo",
+				TypePos: mkpos(3, 2, 3),
+				Map: Map{
+					LBracePos: mkpos(7, 2, 7),
+					RBracePos: mkpos(27, 4, 3),
+					Properties: []*Property{
+						{
+							Name:     "name",
+							NamePos:  mkpos(12, 3, 4),
+							ColonPos: mkpos(16, 3, 8),
+							Value: &String{
+								LiteralPos: mkpos(18, 3, 10),
+								Value:      "abc",
+							},
 						},
 					},
 				},
 			},
 			&Module{
-				Type:      Ident{"bar", mkpos(32, 6, 3)},
-				LbracePos: mkpos(36, 6, 7),
-				RbracePos: mkpos(56, 8, 3),
-				Properties: []*Property{
-					{
-						Name: Ident{"name", mkpos(41, 7, 4)},
-						Pos:  mkpos(45, 7, 8),
-						Value: Value{
-							Type:        String,
-							Pos:         mkpos(47, 7, 10),
-							StringValue: "def",
+				Type:    "bar",
+				TypePos: mkpos(32, 6, 3),
+				Map: Map{
+					LBracePos: mkpos(36, 6, 7),
+					RBracePos: mkpos(56, 8, 3),
+					Properties: []*Property{
+						{
+							Name:     "name",
+							NamePos:  mkpos(41, 7, 4),
+							ColonPos: mkpos(45, 7, 8),
+							Value: &String{
+								LiteralPos: mkpos(47, 7, 10),
+								Value:      "def",
+							},
 						},
 					},
 				},
@@ -297,180 +336,280 @@ var validParseTestCases = []struct {
 		`,
 		[]Definition{
 			&Assignment{
-				Name: Ident{"foo", mkpos(3, 2, 3)},
-				Pos:  mkpos(7, 2, 7),
-				Value: Value{
-					Type:        String,
-					Pos:         mkpos(9, 2, 9),
-					StringValue: "stuff",
+				Name:      "foo",
+				NamePos:   mkpos(3, 2, 3),
+				EqualsPos: mkpos(7, 2, 7),
+				Value: &String{
+					LiteralPos: mkpos(9, 2, 9),
+					Value:      "stuff",
 				},
-				OrigValue: Value{
-					Type:        String,
-					Pos:         mkpos(9, 2, 9),
-					StringValue: "stuff",
-				},
-				Assigner:   "=",
-				Referenced: true,
-			},
-			&Assignment{
-				Name: Ident{"bar", mkpos(19, 3, 3)},
-				Pos:  mkpos(23, 3, 7),
-				Value: Value{
-					Type:        String,
-					Pos:         mkpos(25, 3, 9),
-					StringValue: "stuff",
-					Variable:    "foo",
-				},
-				OrigValue: Value{
-					Type:        String,
-					Pos:         mkpos(25, 3, 9),
-					StringValue: "stuff",
-					Variable:    "foo",
+				OrigValue: &String{
+					LiteralPos: mkpos(9, 2, 9),
+					Value:      "stuff",
 				},
 				Assigner:   "=",
 				Referenced: true,
 			},
 			&Assignment{
-				Name: Ident{"baz", mkpos(31, 4, 3)},
-				Pos:  mkpos(35, 4, 7),
-				Value: Value{
-					Type:        String,
-					Pos:         mkpos(37, 4, 9),
-					StringValue: "stuffstuff",
-					Expression: &Expression{
-						Args: [2]Value{
-							{
-								Type:        String,
-								Pos:         mkpos(37, 4, 9),
-								StringValue: "stuff",
-								Variable:    "foo",
-							},
-							{
-								Type:        String,
-								Pos:         mkpos(43, 4, 15),
-								StringValue: "stuff",
-								Variable:    "bar",
-							},
-						},
-						Operator: '+',
-						Pos:      mkpos(41, 4, 13),
+				Name:      "bar",
+				NamePos:   mkpos(19, 3, 3),
+				EqualsPos: mkpos(23, 3, 7),
+				Value: &Variable{
+					Name:    "foo",
+					NamePos: mkpos(25, 3, 9),
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuff",
 					},
 				},
-				OrigValue: Value{
-					Type:        String,
-					Pos:         mkpos(37, 4, 9),
-					StringValue: "stuffstuff",
-					Expression: &Expression{
-						Args: [2]Value{
-							{
-								Type:        String,
-								Pos:         mkpos(37, 4, 9),
-								StringValue: "stuff",
-								Variable:    "foo",
-							},
-							{
-								Type:        String,
-								Pos:         mkpos(43, 4, 15),
-								StringValue: "stuff",
-								Variable:    "bar",
-							},
-						},
-						Operator: '+',
-						Pos:      mkpos(41, 4, 13),
+				OrigValue: &Variable{
+					Name:    "foo",
+					NamePos: mkpos(25, 3, 9),
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuff",
 					},
 				},
 				Assigner:   "=",
 				Referenced: true,
 			},
 			&Assignment{
-				Name: Ident{"boo", mkpos(49, 5, 3)},
-				Pos:  mkpos(53, 5, 7),
-				Value: Value{
-					Type:        String,
-					Pos:         mkpos(55, 5, 9),
-					StringValue: "stuffstuffstuff",
-					Expression: &Expression{
-						Args: [2]Value{
-							{
-								Type:        String,
-								Pos:         mkpos(55, 5, 9),
-								StringValue: "stuffstuff",
-								Variable:    "baz",
-								Expression: &Expression{
-									Args: [2]Value{
-										{
-											Type:        String,
-											Pos:         mkpos(37, 4, 9),
-											StringValue: "stuff",
-											Variable:    "foo",
-										},
-										{
-											Type:        String,
-											Pos:         mkpos(43, 4, 15),
-											StringValue: "stuff",
-											Variable:    "bar",
-										},
-									},
-									Operator: '+',
-									Pos:      mkpos(41, 4, 13),
+				Name:      "baz",
+				NamePos:   mkpos(31, 4, 3),
+				EqualsPos: mkpos(35, 4, 7),
+				Value: &Operator{
+					OperatorPos: mkpos(41, 4, 13),
+					Operator:    '+',
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuffstuff",
+					},
+					Args: [2]Expression{
+						&Variable{
+							Name:    "foo",
+							NamePos: mkpos(37, 4, 9),
+							Value: &String{
+								LiteralPos: mkpos(9, 2, 9),
+								Value:      "stuff",
+							},
+						},
+						&Variable{
+							Name:    "bar",
+							NamePos: mkpos(43, 4, 15),
+							Value: &Variable{
+								Name:    "foo",
+								NamePos: mkpos(25, 3, 9),
+								Value: &String{
+									LiteralPos: mkpos(9, 2, 9),
+									Value:      "stuff",
 								},
 							},
-							{
-								Variable:    "foo",
-								Type:        String,
-								Pos:         mkpos(68, 6, 10),
-								StringValue: "stuff",
-							},
 						},
-						Pos:      mkpos(66, 6, 8),
-						Operator: '+',
 					},
 				},
-				OrigValue: Value{
-					Type:        String,
-					Pos:         mkpos(55, 5, 9),
-					StringValue: "stuffstuff",
-					Variable:    "baz",
-					Expression: &Expression{
-						Args: [2]Value{
-							{
-								Type:        String,
-								Pos:         mkpos(37, 4, 9),
-								StringValue: "stuff",
-								Variable:    "foo",
-							},
-							{
-								Type:        String,
-								Pos:         mkpos(43, 4, 15),
-								StringValue: "stuff",
-								Variable:    "bar",
+				OrigValue: &Operator{
+					OperatorPos: mkpos(41, 4, 13),
+					Operator:    '+',
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuffstuff",
+					},
+					Args: [2]Expression{
+						&Variable{
+							Name:    "foo",
+							NamePos: mkpos(37, 4, 9),
+							Value: &String{
+								LiteralPos: mkpos(9, 2, 9),
+								Value:      "stuff",
 							},
 						},
-						Operator: '+',
-						Pos:      mkpos(41, 4, 13),
+						&Variable{
+							Name:    "bar",
+							NamePos: mkpos(43, 4, 15),
+							Value: &Variable{
+								Name:    "foo",
+								NamePos: mkpos(25, 3, 9),
+								Value: &String{
+									LiteralPos: mkpos(9, 2, 9),
+									Value:      "stuff",
+								},
+							},
+						},
+					},
+				},
+				Assigner:   "=",
+				Referenced: true,
+			},
+			&Assignment{
+				Name:      "boo",
+				NamePos:   mkpos(49, 5, 3),
+				EqualsPos: mkpos(53, 5, 7),
+				Value: &Operator{
+					Args: [2]Expression{
+						&Variable{
+							Name:    "baz",
+							NamePos: mkpos(55, 5, 9),
+							Value: &Operator{
+								OperatorPos: mkpos(41, 4, 13),
+								Operator:    '+',
+								Value: &String{
+									LiteralPos: mkpos(9, 2, 9),
+									Value:      "stuffstuff",
+								},
+								Args: [2]Expression{
+									&Variable{
+										Name:    "foo",
+										NamePos: mkpos(37, 4, 9),
+										Value: &String{
+											LiteralPos: mkpos(9, 2, 9),
+											Value:      "stuff",
+										},
+									},
+									&Variable{
+										Name:    "bar",
+										NamePos: mkpos(43, 4, 15),
+										Value: &Variable{
+											Name:    "foo",
+											NamePos: mkpos(25, 3, 9),
+											Value: &String{
+												LiteralPos: mkpos(9, 2, 9),
+												Value:      "stuff",
+											},
+										},
+									},
+								},
+							},
+						},
+						&Variable{
+							Name:    "foo",
+							NamePos: mkpos(68, 6, 10),
+							Value: &String{
+								LiteralPos: mkpos(9, 2, 9),
+								Value:      "stuff",
+							},
+						},
+					},
+					OperatorPos: mkpos(66, 6, 8),
+					Operator:    '+',
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuffstuffstuff",
+					},
+				},
+				OrigValue: &Variable{
+					Name:    "baz",
+					NamePos: mkpos(55, 5, 9),
+					Value: &Operator{
+						OperatorPos: mkpos(41, 4, 13),
+						Operator:    '+',
+						Value: &String{
+							LiteralPos: mkpos(9, 2, 9),
+							Value:      "stuffstuff",
+						},
+						Args: [2]Expression{
+							&Variable{
+								Name:    "foo",
+								NamePos: mkpos(37, 4, 9),
+								Value: &String{
+									LiteralPos: mkpos(9, 2, 9),
+									Value:      "stuff",
+								},
+							},
+							&Variable{
+								Name:    "bar",
+								NamePos: mkpos(43, 4, 15),
+								Value: &Variable{
+									Name:    "foo",
+									NamePos: mkpos(25, 3, 9),
+									Value: &String{
+										LiteralPos: mkpos(9, 2, 9),
+										Value:      "stuff",
+									},
+								},
+							},
+						},
 					},
 				},
 				Assigner: "=",
 			},
 			&Assignment{
-				Name: Ident{"boo", mkpos(61, 6, 3)},
-				Pos:  mkpos(66, 6, 8),
-				Value: Value{
-					Type:        String,
-					Pos:         mkpos(68, 6, 10),
-					StringValue: "stuff",
-					Variable:    "foo",
+				Name:      "boo",
+				NamePos:   mkpos(61, 6, 3),
+				EqualsPos: mkpos(66, 6, 8),
+				Value: &Variable{
+					Name:    "foo",
+					NamePos: mkpos(68, 6, 10),
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuff",
+					},
 				},
-				OrigValue: Value{
-					Type:        String,
-					Pos:         mkpos(68, 6, 10),
-					StringValue: "stuff",
-					Variable:    "foo",
+				OrigValue: &Variable{
+					Name:    "foo",
+					NamePos: mkpos(68, 6, 10),
+					Value: &String{
+						LiteralPos: mkpos(9, 2, 9),
+						Value:      "stuff",
+					},
 				},
 				Assigner: "+=",
 			},
 		},
 		nil,
+	},
+	{`
+		// comment1
+		// comment2
+
+		/* comment3
+		   comment4 */
+		// comment5
+
+		/* comment6 */ /* comment7 */ // comment8
+		`,
+		nil,
+		[]*CommentGroup{
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"// comment1"},
+						Slash:   mkpos(3, 2, 3),
+					},
+					&Comment{
+						Comment: []string{"// comment2"},
+						Slash:   mkpos(17, 3, 3),
+					},
+				},
+			},
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"/* comment3", "		   comment4 */"},
+						Slash: mkpos(32, 5, 3),
+					},
+					&Comment{
+						Comment: []string{"// comment5"},
+						Slash:   mkpos(63, 7, 3),
+					},
+				},
+			},
+			{
+				Comments: []*Comment{
+					&Comment{
+						Comment: []string{"/* comment6 */"},
+						Slash:   mkpos(78, 9, 3),
+					},
+					&Comment{
+						Comment: []string{"/* comment7 */"},
+						Slash:   mkpos(93, 9, 18),
+					},
+					&Comment{
+						Comment: []string{"// comment8"},
+						Slash:   mkpos(108, 9, 33),
+					},
+				},
+			},
+		},
 	},
 }
 
@@ -504,7 +643,7 @@ func TestParseValidInput(t *testing.T) {
 
 		if len(file.Comments) == len(testCase.comments) {
 			for i := range file.Comments {
-				if !reflect.DeepEqual(file.Comments, testCase.comments) {
+				if !reflect.DeepEqual(file.Comments[i], testCase.comments[i]) {
 					t.Errorf("test case: %s", testCase.input)
 					t.Errorf("incorrect comment %d:", i)
 					t.Errorf("  expected: %s", testCase.comments[i])

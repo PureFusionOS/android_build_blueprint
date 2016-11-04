@@ -28,6 +28,7 @@ type SingletonContext interface {
 	ModuleName(module Module) string
 	ModuleDir(module Module) string
 	ModuleSubDir(module Module) string
+	ModuleType(module Module) string
 	BlueprintFile(module Module) string
 
 	ModuleErrorf(module Module, format string, args ...interface{})
@@ -43,6 +44,11 @@ type SingletonContext interface {
 	// that controls where Ninja stores its build log files.  This value can be
 	// set at most one time for a single build, later calls are ignored.
 	SetNinjaBuildDir(pctx PackageContext, value string)
+
+	// Eval takes a string with embedded ninja variables, and returns a string
+	// with all of the variables recursively expanded. Any variables references
+	// are expanded in the scope of the PackageContext.
+	Eval(pctx PackageContext, ninjaStr string) (string, error)
 
 	VisitAllModules(visit func(Module))
 	VisitAllModulesIf(pred func(Module) bool, visit func(Module))
@@ -64,6 +70,7 @@ type singletonContext struct {
 	context *Context
 	config  interface{}
 	scope   *localScope
+	globals *liveTracker
 
 	ninjaFileDeps []string
 	errs          []error
@@ -85,6 +92,10 @@ func (s *singletonContext) ModuleDir(logicModule Module) string {
 
 func (s *singletonContext) ModuleSubDir(logicModule Module) string {
 	return s.context.ModuleSubDir(logicModule)
+}
+
+func (s *singletonContext) ModuleType(logicModule Module) string {
+	return s.context.ModuleType(logicModule)
 }
 
 func (s *singletonContext) BlueprintFile(logicModule Module) string {
@@ -147,6 +158,22 @@ func (s *singletonContext) Build(pctx PackageContext, params BuildParams) {
 	}
 
 	s.actionDefs.buildDefs = append(s.actionDefs.buildDefs, def)
+}
+
+func (s *singletonContext) Eval(pctx PackageContext, str string) (string, error) {
+	s.scope.ReparentTo(pctx)
+
+	ninjaStr, err := parseNinjaString(s.scope, str)
+	if err != nil {
+		return "", err
+	}
+
+	err = s.globals.addNinjaStringDeps(ninjaStr)
+	if err != nil {
+		return "", err
+	}
+
+	return ninjaStr.Eval(s.globals.variables)
 }
 
 func (s *singletonContext) RequireNinjaVersion(major, minor, micro int) {

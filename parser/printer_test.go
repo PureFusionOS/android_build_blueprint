@@ -62,6 +62,49 @@ foo {
 	},
 	{
 		input: `
+		        var = "asdf"
+			foo {
+				stuff: ["asdf"] + var,
+			}`,
+		output: `
+var = "asdf"
+foo {
+    stuff: ["asdf"] + var,
+}
+`,
+	},
+	{
+		input: `
+		        var = "asdf"
+			foo {
+				stuff: [
+				    "asdf"
+				] + var,
+			}`,
+		output: `
+var = "asdf"
+foo {
+    stuff: [
+        "asdf",
+    ] + var,
+}
+`,
+	},
+	{
+		input: `
+		        var = "asdf"
+			foo {
+				stuff: ["asdf"] + var + ["qwert"],
+			}`,
+		output: `
+var = "asdf"
+foo {
+    stuff: ["asdf"] + var + ["qwert"],
+}
+`,
+	},
+	{
+		input: `
 		foo {
 			stuff: {
 				isGood: true,
@@ -162,8 +205,8 @@ test /* test */ {
     deps: ["libabc"],
     incs: [],
 } //test
-
 //test
+
 test2 {
 }
 
@@ -210,7 +253,7 @@ test {
 }
 
 // This
-/* Is */
+/* Is *//* A */ // A
 // A
 
 // Multiline
@@ -236,7 +279,7 @@ test {
 }
 
 // This
-/* Is */
+/* Is */ /* A */ // A
 // A
 
 // Multiline
@@ -251,6 +294,22 @@ test {}
 
 // Multiline
 // Comment
+`,
+	},
+	{
+		input: `
+test // test
+
+// test
+{
+}
+`,
+		output: `
+test { // test
+
+// test
+
+}
 `,
 	},
 }

@@ -84,6 +84,16 @@ import (
 // or variants of the current Module must be synchronized by the implementation of
 // GenerateBuildActions.
 type Module interface {
+	// Name returns a string used to uniquely identify each module.  The return
+	// value must be unique across all modules.  It is only called once, during
+	// initial blueprint parsing.  To change the name later a mutator must call
+	// MutatorContext.Rename
+	//
+	// In most cases, Name should return the contents of a "name:" property from
+	// the blueprint file.  An embeddable SimpleName object can be used for this
+	// case.
+	Name() string
+
 	// GenerateBuildActions is called by the Context that created the Module
 	// during its generate phase.  This call should generate all Ninja build
 	// actions (rules, pools, and build statements) needed to build the module.
@@ -129,6 +139,7 @@ type ModuleContext interface {
 
 	OtherModuleName(m Module) string
 	OtherModuleErrorf(m Module, fmt string, args ...interface{})
+	OtherModuleDependencyTag(m Module) DependencyTag
 
 	VisitDirectDeps(visit func(Module))
 	VisitDirectDepsIf(pred func(Module) bool, visit func(Module))
@@ -154,10 +165,12 @@ type ModuleContext interface {
 var _ BaseModuleContext = (*baseModuleContext)(nil)
 
 type baseModuleContext struct {
-	context *Context
-	config  interface{}
-	module  *moduleInfo
-	errs    []error
+	context        *Context
+	config         interface{}
+	module         *moduleInfo
+	errs           []error
+	visitingParent *moduleInfo
+	visitingDep    depInfo
 }
 
 func (d *baseModuleContext) moduleInfo() *moduleInfo {
@@ -165,7 +178,7 @@ func (d *baseModuleContext) moduleInfo() *moduleInfo {
 }
 
 func (d *baseModuleContext) ModuleName() string {
-	return d.module.properties.Name
+	return d.module.Name()
 }
 
 func (d *baseModuleContext) ContainsProperty(name string) bool {
@@ -190,7 +203,7 @@ func (d *baseModuleContext) error(err error) {
 func (d *baseModuleContext) Errorf(pos scanner.Position,
 	format string, args ...interface{}) {
 
-	d.error(&Error{
+	d.error(&BlueprintError{
 		Err: fmt.Errorf(format, args...),
 		Pos: pos,
 	})
@@ -199,9 +212,12 @@ func (d *baseModuleContext) Errorf(pos scanner.Position,
 func (d *baseModuleContext) ModuleErrorf(format string,
 	args ...interface{}) {
 
-	d.error(&Error{
-		Err: fmt.Errorf(format, args...),
-		Pos: d.module.pos,
+	d.error(&ModuleError{
+		BlueprintError: BlueprintError{
+			Err: fmt.Errorf(format, args...),
+			Pos: d.module.pos,
+		},
+		module: d.module,
 	})
 }
 
@@ -214,11 +230,15 @@ func (d *baseModuleContext) PropertyErrorf(property, format string,
 		pos = d.module.pos
 	}
 
-	format = property + ": " + format
-
-	d.error(&Error{
-		Err: fmt.Errorf(format, args...),
-		Pos: pos,
+	d.error(&PropertyError{
+		ModuleError: ModuleError{
+			BlueprintError: BlueprintError{
+				Err: fmt.Errorf(format, args...),
+				Pos: pos,
+			},
+			module: d.module,
+		},
+		property: property,
 	})
 }
 
@@ -236,41 +256,128 @@ type moduleContext struct {
 	handledMissingDeps bool
 }
 
-func (m *moduleContext) OtherModuleName(logicModule Module) string {
+func (m *baseModuleContext) OtherModuleName(logicModule Module) string {
 	module := m.context.moduleInfo[logicModule]
-	return module.properties.Name
+	return module.Name()
 }
 
-func (m *moduleContext) OtherModuleErrorf(logicModule Module, format string,
+func (m *baseModuleContext) OtherModuleErrorf(logicModule Module, format string,
 	args ...interface{}) {
 
 	module := m.context.moduleInfo[logicModule]
-	m.errs = append(m.errs, &Error{
-		Err: fmt.Errorf(format, args...),
-		Pos: module.pos,
+	m.errs = append(m.errs, &ModuleError{
+		BlueprintError: BlueprintError{
+			Err: fmt.Errorf(format, args...),
+			Pos: module.pos,
+		},
+		module: module,
 	})
 }
 
-func (m *moduleContext) VisitDirectDeps(visit func(Module)) {
-	m.context.visitDirectDeps(m.module, visit)
+func (m *baseModuleContext) OtherModuleDependencyTag(logicModule Module) DependencyTag {
+	// fast path for calling OtherModuleDependencyTag from inside VisitDirectDeps
+	if logicModule == m.visitingDep.module.logicModule {
+		return m.visitingDep.tag
+	}
+
+	for _, dep := range m.visitingParent.directDeps {
+		if dep.module.logicModule == logicModule {
+			return dep.tag
+		}
+	}
+
+	return nil
 }
 
-func (m *moduleContext) VisitDirectDepsIf(pred func(Module) bool, visit func(Module)) {
-	m.context.visitDirectDepsIf(m.module, pred, visit)
+func (m *baseModuleContext) VisitDirectDeps(visit func(Module)) {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(newPanicErrorf(r, "VisitDirectDeps(%s, %s) for dependency %s",
+				m.module, funcName(visit), m.visitingDep.module))
+		}
+	}()
+
+	m.visitingParent = m.module
+
+	for _, dep := range m.module.directDeps {
+		m.visitingDep = dep
+		visit(dep.module.logicModule)
+	}
+
+	m.visitingParent = nil
+	m.visitingDep = depInfo{}
 }
 
-func (m *moduleContext) VisitDepsDepthFirst(visit func(Module)) {
-	m.context.visitDepsDepthFirst(m.module, visit)
+func (m *baseModuleContext) VisitDirectDepsIf(pred func(Module) bool, visit func(Module)) {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(newPanicErrorf(r, "VisitDirectDepsIf(%s, %s, %s) for dependency %s",
+				m.module, funcName(pred), funcName(visit), m.visitingDep.module))
+		}
+	}()
+
+	m.visitingParent = m.module
+
+	for _, dep := range m.module.directDeps {
+		m.visitingDep = dep
+		if pred(dep.module.logicModule) {
+			visit(dep.module.logicModule)
+		}
+	}
+
+	m.visitingParent = nil
+	m.visitingDep = depInfo{}
 }
 
-func (m *moduleContext) VisitDepsDepthFirstIf(pred func(Module) bool,
+func (m *baseModuleContext) VisitDepsDepthFirst(visit func(Module)) {
+	defer func() {
+		if r := recover(); r != nil {
+			panic(newPanicErrorf(r, "VisitDepsDepthFirst(%s, %s) for dependency %s",
+				m.module, funcName(visit), m.visitingDep.module))
+		}
+	}()
+
+	m.context.walkDeps(m.module, nil, func(dep depInfo, parent *moduleInfo) {
+		m.visitingParent = parent
+		m.visitingDep = dep
+		visit(dep.module.logicModule)
+	})
+
+	m.visitingParent = nil
+	m.visitingDep = depInfo{}
+}
+
+func (m *baseModuleContext) VisitDepsDepthFirstIf(pred func(Module) bool,
 	visit func(Module)) {
 
-	m.context.visitDepsDepthFirstIf(m.module, pred, visit)
+	defer func() {
+		if r := recover(); r != nil {
+			panic(newPanicErrorf(r, "VisitDepsDepthFirstIf(%s, %s, %s) for dependency %s",
+				m.module, funcName(pred), funcName(visit), m.visitingDep.module))
+		}
+	}()
+
+	m.context.walkDeps(m.module, nil, func(dep depInfo, parent *moduleInfo) {
+		if pred(dep.module.logicModule) {
+			m.visitingParent = parent
+			m.visitingDep = dep
+			visit(dep.module.logicModule)
+		}
+	})
+
+	m.visitingParent = nil
+	m.visitingDep = depInfo{}
 }
 
-func (m *moduleContext) WalkDeps(visit func(Module, Module) bool) {
-	m.context.walkDeps(m.module, visit)
+func (m *baseModuleContext) WalkDeps(visit func(Module, Module) bool) {
+	m.context.walkDeps(m.module, func(dep depInfo, parent *moduleInfo) bool {
+		m.visitingParent = parent
+		m.visitingDep = dep
+		return visit(dep.module.logicModule, parent.logicModule)
+	}, nil)
+
+	m.visitingParent = nil
+	m.visitingDep = depInfo{}
 }
 
 func (m *moduleContext) ModuleSubDir() string {
@@ -342,12 +449,15 @@ func (m *moduleContext) GetMissingDependencies() []string {
 type mutatorContext struct {
 	baseModuleContext
 	name        string
-	reverseDeps map[*moduleInfo][]*moduleInfo
+	reverseDeps []reverseDep
+	newModules  []*moduleInfo
 }
 
 type baseMutatorContext interface {
 	BaseModuleContext
 
+	OtherModuleExists(name string) bool
+	Rename(name string)
 	Module() Module
 }
 
@@ -363,6 +473,7 @@ type TopDownMutatorContext interface {
 
 	OtherModuleName(m Module) string
 	OtherModuleErrorf(m Module, fmt string, args ...interface{})
+	OtherModuleDependencyTag(m Module) DependencyTag
 
 	VisitDirectDeps(visit func(Module))
 	VisitDirectDepsIf(pred func(Module) bool, visit func(Module))
@@ -374,13 +485,15 @@ type TopDownMutatorContext interface {
 type BottomUpMutatorContext interface {
 	baseMutatorContext
 
-	AddDependency(module Module, name ...string)
-	AddReverseDependency(module Module, name string)
+	AddDependency(module Module, tag DependencyTag, name ...string)
+	AddReverseDependency(module Module, tag DependencyTag, name string)
 	CreateVariations(...string) []Module
 	CreateLocalVariations(...string) []Module
 	SetDependencyVariation(string)
-	AddVariationDependencies([]Variation, ...string)
-	AddFarVariationDependencies([]Variation, ...string)
+	AddVariationDependencies([]Variation, DependencyTag, ...string)
+	AddFarVariationDependencies([]Variation, DependencyTag, ...string)
+	AddInterVariantDependency(tag DependencyTag, from, to Module)
+	ReplaceDependencies(string)
 }
 
 // A Mutator function is called for each Module, and can use
@@ -395,6 +508,22 @@ type BottomUpMutatorContext interface {
 type TopDownMutator func(mctx TopDownMutatorContext)
 type BottomUpMutator func(mctx BottomUpMutatorContext)
 type EarlyMutator func(mctx EarlyMutatorContext)
+
+// DependencyTag is an interface to an arbitrary object that embeds BaseDependencyTag.  It can be
+// used to transfer information on a dependency between the mutator that called AddDependency
+// and the GenerateBuildActions method.  Variants created by CreateVariations have a copy of the
+// interface (pointing to the same concrete object) from their original module.
+type DependencyTag interface {
+	dependencyTag(DependencyTag)
+}
+
+type BaseDependencyTag struct {
+}
+
+func (BaseDependencyTag) dependencyTag(DependencyTag) {
+}
+
+var _ DependencyTag = BaseDependencyTag{}
 
 // Split a module into mulitple variants, one for each name in the variationNames
 // parameter.  It returns a list of new modules in the same order as the variationNames
@@ -436,6 +565,11 @@ func (mctx *mutatorContext) createVariations(variationNames []string, local bool
 		}
 	}
 
+	if mctx.newModules != nil {
+		panic("module already has variations from this mutator")
+	}
+	mctx.newModules = modules
+
 	if len(ret) != len(variationNames) {
 		panic("oops!")
 	}
@@ -456,9 +590,9 @@ func (mctx *mutatorContext) Module() Module {
 // Add a dependency to the given module.
 // Does not affect the ordering of the current mutator pass, but will be ordered
 // correctly for all future mutator passes.
-func (mctx *mutatorContext) AddDependency(module Module, deps ...string) {
+func (mctx *mutatorContext) AddDependency(module Module, tag DependencyTag, deps ...string) {
 	for _, dep := range deps {
-		errs := mctx.context.addDependency(mctx.context.moduleInfo[module], dep)
+		errs := mctx.context.addDependency(mctx.context.moduleInfo[module], tag, dep)
 		if len(errs) > 0 {
 			mctx.errs = append(mctx.errs, errs...)
 		}
@@ -470,26 +604,28 @@ func (mctx *mutatorContext) AddDependency(module Module, deps ...string) {
 // correctly for all future mutator passes.  All reverse dependencies for a destination module are
 // collected until the end of the mutator pass, sorted by name, and then appended to the destination
 // module's dependency list.
-func (mctx *mutatorContext) AddReverseDependency(module Module, destName string) {
+func (mctx *mutatorContext) AddReverseDependency(module Module, tag DependencyTag, destName string) {
 	destModule, errs := mctx.context.findReverseDependency(mctx.context.moduleInfo[module], destName)
 	if len(errs) > 0 {
 		mctx.errs = append(mctx.errs, errs...)
 		return
 	}
 
-	mctx.reverseDeps[destModule] = append(mctx.reverseDeps[destModule],
-		mctx.context.moduleInfo[module])
+	mctx.reverseDeps = append(mctx.reverseDeps, reverseDep{
+		destModule,
+		depInfo{mctx.context.moduleInfo[module], tag},
+	})
 }
 
 // AddVariationDependencies adds deps as dependencies of the current module, but uses the variations
 // argument to select which variant of the dependency to use.  A variant of the dependency must
 // exist that matches the all of the non-local variations of the current module, plus the variations
 // argument.
-func (mctx *mutatorContext) AddVariationDependencies(variations []Variation,
+func (mctx *mutatorContext) AddVariationDependencies(variations []Variation, tag DependencyTag,
 	deps ...string) {
 
 	for _, dep := range deps {
-		errs := mctx.context.addVariationDependency(mctx.module, variations, dep, false)
+		errs := mctx.context.addVariationDependency(mctx.module, variations, tag, dep, false)
 		if len(errs) > 0 {
 			mctx.errs = append(mctx.errs, errs...)
 		}
@@ -503,50 +639,47 @@ func (mctx *mutatorContext) AddVariationDependencies(variations []Variation,
 //
 // Unlike AddVariationDependencies, the variations of the current module are ignored - the
 // depdendency only needs to match the supplied variations.
-func (mctx *mutatorContext) AddFarVariationDependencies(variations []Variation,
+func (mctx *mutatorContext) AddFarVariationDependencies(variations []Variation, tag DependencyTag,
 	deps ...string) {
 
 	for _, dep := range deps {
-		errs := mctx.context.addVariationDependency(mctx.module, variations, dep, true)
+		errs := mctx.context.addVariationDependency(mctx.module, variations, tag, dep, true)
 		if len(errs) > 0 {
 			mctx.errs = append(mctx.errs, errs...)
 		}
 	}
 }
 
-func (mctx *mutatorContext) OtherModuleName(logicModule Module) string {
-	module := mctx.context.moduleInfo[logicModule]
-	return module.properties.Name
+func (mctx *mutatorContext) AddInterVariantDependency(tag DependencyTag, from, to Module) {
+	mctx.context.addInterVariantDependency(mctx.module, tag, from, to)
 }
 
-func (mctx *mutatorContext) OtherModuleErrorf(logicModule Module, format string,
-	args ...interface{}) {
-
-	module := mctx.context.moduleInfo[logicModule]
-	mctx.errs = append(mctx.errs, &Error{
-		Err: fmt.Errorf(format, args...),
-		Pos: module.pos,
-	})
+// ReplaceDependencies replaces all dependencies on the identical variant of the module with the
+// specified name with the current variant of this module.  Replacements don't take effect until
+// after the mutator pass is finished.
+func (mctx *mutatorContext) ReplaceDependencies(name string) {
+	mctx.context.replaceDependencies(mctx.module, name)
 }
 
-func (mctx *mutatorContext) VisitDirectDeps(visit func(Module)) {
-	mctx.context.visitDirectDeps(mctx.module, visit)
+func (mctx *mutatorContext) OtherModuleExists(name string) bool {
+	return mctx.context.moduleNames[name] != nil
 }
 
-func (mctx *mutatorContext) VisitDirectDepsIf(pred func(Module) bool, visit func(Module)) {
-	mctx.context.visitDirectDepsIf(mctx.module, pred, visit)
+// Rename all variants of a module.  The new name is not visible to calls to ModuleName,
+// AddDependency or OtherModuleName until after this mutator pass is complete.
+func (mctx *mutatorContext) Rename(name string) {
+	mctx.context.rename(mctx.module.group, name)
 }
 
-func (mctx *mutatorContext) VisitDepsDepthFirst(visit func(Module)) {
-	mctx.context.visitDepsDepthFirst(mctx.module, visit)
+// SimpleName is an embeddable object to implement the ModuleContext.Name method using a property
+// called "name".  Modules that embed it must also add SimpleName.Properties to their property
+// structure list.
+type SimpleName struct {
+	Properties struct {
+		Name string
+	}
 }
 
-func (mctx *mutatorContext) VisitDepsDepthFirstIf(pred func(Module) bool,
-	visit func(Module)) {
-
-	mctx.context.visitDepsDepthFirstIf(mctx.module, pred, visit)
-}
-
-func (mctx *mutatorContext) WalkDeps(visit func(Module, Module) bool) {
-	mctx.context.walkDeps(mctx.module, visit)
+func (s *SimpleName) Name() string {
+	return s.Properties.Name
 }

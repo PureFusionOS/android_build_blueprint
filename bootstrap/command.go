@@ -22,34 +22,37 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
+	"runtime/trace"
 
 	"github.com/google/blueprint"
 	"github.com/google/blueprint/deptools"
 )
 
 var (
-	outFile          string
-	depFile          string
-	timestampFile    string
-	timestampDepFile string
-	manifestFile     string
-	docFile          string
-	cpuprofile       string
-	runGoTests       bool
+	outFile    string
+	depFile    string
+	docFile    string
+	cpuprofile string
+	memprofile string
+	traceFile  string
+	runGoTests bool
+	noGC       bool
 
 	BuildDir string
+	SrcDir   string
 )
 
 func init() {
 	flag.StringVar(&outFile, "o", "build.ninja.in", "the Ninja file to output")
 	flag.StringVar(&BuildDir, "b", ".", "the build output directory")
 	flag.StringVar(&depFile, "d", "", "the dependency file to output")
-	flag.StringVar(&timestampFile, "timestamp", "", "file to write before the output file")
-	flag.StringVar(&timestampDepFile, "timestampdep", "", "the dependency file for the timestamp file")
-	flag.StringVar(&manifestFile, "m", "", "the bootstrap manifest file")
 	flag.StringVar(&docFile, "docs", "", "build documentation file to output")
 	flag.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to file")
+	flag.StringVar(&traceFile, "trace", "", "write trace to file")
+	flag.StringVar(&memprofile, "memprofile", "", "write memory profile to file")
+	flag.BoolVar(&noGC, "nogc", false, "turn off GC for debugging")
 	flag.BoolVar(&runGoTests, "t", false, "build and run go tests during bootstrap")
 }
 
@@ -59,6 +62,10 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
 	}
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	if noGC {
+		debug.SetGCPercent(-1)
+	}
 
 	if cpuprofile != "" {
 		f, err := os.Create(cpuprofile)
@@ -70,9 +77,21 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
 		defer pprof.StopCPUProfile()
 	}
 
+	if traceFile != "" {
+		f, err := os.Create(traceFile)
+		if err != nil {
+			fatalf("error opening trace: %s", err)
+		}
+		trace.Start(f)
+		defer f.Close()
+		defer trace.Stop()
+	}
+
 	if flag.NArg() != 1 {
 		fatalf("no Blueprints file specified")
 	}
+
+	SrcDir = filepath.Dir(flag.Arg(0))
 
 	stage := StageMain
 	if c, ok := config.(ConfigInterface); ok {
@@ -94,6 +113,7 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
 	ctx.RegisterModuleType("bootstrap_go_package", newGoPackageModuleFactory(bootstrapConfig))
 	ctx.RegisterModuleType("bootstrap_core_go_binary", newGoBinaryModuleFactory(bootstrapConfig, StageBootstrap))
 	ctx.RegisterModuleType("bootstrap_go_binary", newGoBinaryModuleFactory(bootstrapConfig, StagePrimary))
+	ctx.RegisterModuleType("blueprint_go_binary", newGoBinaryModuleFactory(bootstrapConfig, StageMain))
 	ctx.RegisterTopDownMutator("bootstrap_stage", propagateStageBootstrap)
 	ctx.RegisterSingletonType("bootstrap", newSingletonFactory(bootstrapConfig))
 
@@ -131,20 +151,6 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
 	}
 
 	const outFilePermissions = 0666
-	if timestampFile != "" {
-		err := ioutil.WriteFile(timestampFile, []byte{}, outFilePermissions)
-		if err != nil {
-			fatalf("error writing %s: %s", timestampFile, err)
-		}
-
-		if timestampDepFile != "" {
-			err := deptools.WriteDepFile(timestampDepFile, timestampFile, deps)
-			if err != nil {
-				fatalf("error writing depfile: %s", err)
-			}
-		}
-	}
-
 	err = ioutil.WriteFile(outFile, buf.Bytes(), outFilePermissions)
 	if err != nil {
 		fatalf("error writing %s: %s", outFile, err)
@@ -155,18 +161,22 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
 		if err != nil {
 			fatalf("error writing depfile: %s", err)
 		}
-		err = deptools.WriteDepFile(depFile+".timestamp", outFile+".timestamp", deps)
-		if err != nil {
-			fatalf("error writing depfile: %s", err)
-		}
 	}
 
 	if c, ok := config.(ConfigRemoveAbandonedFiles); !ok || c.RemoveAbandonedFiles() {
-		srcDir := filepath.Dir(bootstrapConfig.topLevelBlueprintsFile)
-		err := removeAbandonedFiles(ctx, bootstrapConfig, srcDir, manifestFile)
+		err := removeAbandonedFiles(ctx, bootstrapConfig, SrcDir)
 		if err != nil {
 			fatalf("error removing abandoned files: %s", err)
 		}
+	}
+
+	if memprofile != "" {
+		f, err := os.Create(memprofile)
+		if err != nil {
+			fatalf("error opening memprofile: %s", err)
+		}
+		defer f.Close()
+		pprof.WriteHeapProfile(f)
 	}
 }
 
@@ -182,7 +192,9 @@ func fatalErrors(errs []error) {
 
 	for _, err := range errs {
 		switch err := err.(type) {
-		case *blueprint.Error:
+		case *blueprint.BlueprintError,
+			*blueprint.ModuleError,
+			*blueprint.PropertyError:
 			fmt.Printf("%serror:%s %s\n", red, unred, err.Error())
 		default:
 			fmt.Printf("%sinternal error:%s %s\n", red, unred, err)

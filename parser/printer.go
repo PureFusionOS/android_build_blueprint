@@ -22,11 +22,11 @@ import (
 	"unicode"
 )
 
-var noPos = scanner.Position{}
+var noPos scanner.Position
 
 type printer struct {
 	defs     []Definition
-	comments []Comment
+	comments []*CommentGroup
 
 	curComment int
 
@@ -40,7 +40,7 @@ type printer struct {
 	indentList []int
 	wsBuf      []byte
 
-	skippedComments []Comment
+	skippedComments []*CommentGroup
 }
 
 func newPrinter(file *File) *printer {
@@ -87,100 +87,98 @@ func (p *printer) printDef(def Definition) {
 }
 
 func (p *printer) printAssignment(assignment *Assignment) {
-	p.printToken(assignment.Name.Name, assignment.Name.Pos)
+	p.printToken(assignment.Name, assignment.NamePos)
 	p.requestSpace()
-	p.printToken(assignment.Assigner, assignment.Pos)
+	p.printToken(assignment.Assigner, assignment.EqualsPos)
 	p.requestSpace()
-	p.printValue(assignment.OrigValue)
+	p.printExpression(assignment.OrigValue)
 	p.requestNewline()
 }
 
 func (p *printer) printModule(module *Module) {
-	p.printToken(module.Type.Name, module.Type.Pos)
-	p.printMap(module.Properties, module.LbracePos, module.RbracePos)
+	p.printToken(module.Type, module.TypePos)
+	p.printMap(&module.Map)
 	p.requestDoubleNewline()
 }
 
-func (p *printer) printValue(value Value) {
-	if value.Variable != "" {
-		p.printToken(value.Variable, value.Pos)
-	} else if value.Expression != nil {
-		p.printExpression(*value.Expression)
-	} else {
-		switch value.Type {
-		case Bool:
-			var s string
-			if value.BoolValue {
-				s = "true"
-			} else {
-				s = "false"
-			}
-			p.printToken(s, value.Pos)
-		case String:
-			p.printToken(strconv.Quote(value.StringValue), value.Pos)
-		case List:
-			p.printList(value.ListValue, value.Pos, value.EndPos)
-		case Map:
-			p.printMap(value.MapValue, value.Pos, value.EndPos)
-		default:
-			panic(fmt.Errorf("bad property type: %d", value.Type))
+func (p *printer) printExpression(value Expression) {
+	switch v := value.(type) {
+	case *Variable:
+		p.printToken(v.Name, v.NamePos)
+	case *Operator:
+		p.printOperator(v)
+	case *Bool:
+		var s string
+		if v.Value {
+			s = "true"
+		} else {
+			s = "false"
 		}
+		p.printToken(s, v.LiteralPos)
+	case *String:
+		p.printToken(strconv.Quote(v.Value), v.LiteralPos)
+	case *List:
+		p.printList(v.Values, v.LBracePos, v.RBracePos)
+	case *Map:
+		p.printMap(v)
+	default:
+		panic(fmt.Errorf("bad property type: %s", value.Type()))
 	}
 }
 
-func (p *printer) printList(list []Value, pos, endPos scanner.Position) {
+func (p *printer) printList(list []Expression, pos, endPos scanner.Position) {
 	p.requestSpace()
 	p.printToken("[", pos)
 	if len(list) > 1 || pos.Line != endPos.Line {
 		p.requestNewline()
 		p.indent(p.curIndent() + 4)
 		for _, value := range list {
-			p.printValue(value)
+			p.printExpression(value)
 			p.printToken(",", noPos)
 			p.requestNewline()
 		}
 		p.unindent(endPos)
 	} else {
 		for _, value := range list {
-			p.printValue(value)
+			p.printExpression(value)
 		}
 	}
 	p.printToken("]", endPos)
 }
 
-func (p *printer) printMap(list []*Property, pos, endPos scanner.Position) {
+func (p *printer) printMap(m *Map) {
 	p.requestSpace()
-	p.printToken("{", pos)
-	if len(list) > 0 || pos.Line != endPos.Line {
+	p.printToken("{", m.LBracePos)
+	if len(m.Properties) > 0 || m.LBracePos.Line != m.RBracePos.Line {
 		p.requestNewline()
 		p.indent(p.curIndent() + 4)
-		for _, prop := range list {
+		for _, prop := range m.Properties {
 			p.printProperty(prop)
 			p.printToken(",", noPos)
 			p.requestNewline()
 		}
-		p.unindent(endPos)
+		p.unindent(m.RBracePos)
 	}
-	p.printToken("}", endPos)
+	p.printToken("}", m.RBracePos)
 }
 
-func (p *printer) printExpression(expression Expression) {
-	p.printValue(expression.Args[0])
+func (p *printer) printOperator(operator *Operator) {
+	p.printExpression(operator.Args[0])
 	p.requestSpace()
-	p.printToken(string(expression.Operator), expression.Pos)
-	if expression.Args[0].Pos.Line == expression.Args[1].Pos.Line {
+	p.printToken(string(operator.Operator), operator.OperatorPos)
+	if operator.Args[0].End().Line == operator.Args[1].Pos().Line {
 		p.requestSpace()
 	} else {
 		p.requestNewline()
 	}
-	p.printValue(expression.Args[1])
+	p.printExpression(operator.Args[1])
 }
 
 func (p *printer) printProperty(property *Property) {
-	p.printToken(property.Name.Name, property.Name.Pos)
-	p.printToken(":", property.Pos)
+	p.printToken(property.Name, property.NamePos)
+	p.printToken(":", property.ColonPos)
 	p.requestSpace()
-	p.printValue(property.Value)
+	p.printExpression(property.Value)
 }
 
 // Print a single token, including any necessary comments or whitespace between
@@ -208,12 +206,11 @@ func (p *printer) printToken(s string, pos scanner.Position) {
 
 // Print any in-line (single line /* */) comments that appear _before_ pos
 func (p *printer) printInLineCommentsBefore(pos scanner.Position) {
-	for p.curComment < len(p.comments) && p.comments[p.curComment].Pos.Offset < pos.Offset {
+	for p.curComment < len(p.comments) && p.comments[p.curComment].Pos().Offset < pos.Offset {
 		c := p.comments[p.curComment]
-		if c.Comment[0][0:2] == "//" || len(c.Comment) > 1 {
+		if c.Comments[0].Comment[0][0:2] == "//" || len(c.Comments[0].Comment) > 1 {
 			p.skippedComments = append(p.skippedComments, c)
 		} else {
-			p.flushSpace()
 			p.printComment(c)
 			p.requestSpace()
 		}
@@ -224,19 +221,15 @@ func (p *printer) printInLineCommentsBefore(pos scanner.Position) {
 // Print any comments, including end of line comments, that appear _before_ the line specified
 // by pos
 func (p *printer) printEndOfLineCommentsBefore(pos scanner.Position) {
-	for _, c := range p.skippedComments {
-		if !p.requestNewlinesForPos(c.Pos) {
-			p.requestSpace()
+	if len(p.skippedComments) > 0 {
+		for _, c := range p.skippedComments {
+			p.printComment(c)
 		}
-		p.printComment(c)
 		p._requestNewline()
+		p.skippedComments = nil
 	}
-	p.skippedComments = []Comment{}
-	for p.curComment < len(p.comments) && p.comments[p.curComment].Pos.Line < pos.Line {
+	for p.curComment < len(p.comments) && p.comments[p.curComment].Pos().Line < pos.Line {
 		c := p.comments[p.curComment]
-		if !p.requestNewlinesForPos(c.Pos) {
-			p.requestSpace()
-		}
 		p.printComment(c)
 		p._requestNewline()
 		p.curComment++
@@ -302,39 +295,38 @@ func (p *printer) flushSpace() {
 }
 
 // Print a single comment, which may be a multi-line comment
-func (p *printer) printComment(comment Comment) {
-	pos := comment.Pos
-	for i, line := range comment.Comment {
-		line = strings.TrimRightFunc(line, unicode.IsSpace)
-		p.flushSpace()
-		if i != 0 {
-			lineIndent := strings.IndexFunc(line, func(r rune) bool { return !unicode.IsSpace(r) })
-			lineIndent = max(lineIndent, p.curIndent())
-			p.pad(lineIndent - p.curIndent())
-			pos.Line++
+func (p *printer) printComment(cg *CommentGroup) {
+	for _, comment := range cg.Comments {
+		if !p.requestNewlinesForPos(comment.Pos()) {
+			p.requestSpace()
 		}
-		p.output = append(p.output, strings.TrimSpace(line)...)
-		if i < len(comment.Comment)-1 {
-			p._requestNewline()
+		for i, line := range comment.Comment {
+			line = strings.TrimRightFunc(line, unicode.IsSpace)
+			p.flushSpace()
+			if i != 0 {
+				lineIndent := strings.IndexFunc(line, func(r rune) bool { return !unicode.IsSpace(r) })
+				lineIndent = max(lineIndent, p.curIndent())
+				p.pad(lineIndent - p.curIndent())
+			}
+			p.output = append(p.output, strings.TrimSpace(line)...)
+			if i < len(comment.Comment)-1 {
+				p._requestNewline()
+			}
 		}
+		p.pos = comment.End()
 	}
-	p.pos = pos
 }
 
 // Print any comments that occur after the last token, and a trailing newline
 func (p *printer) flush() {
 	for _, c := range p.skippedComments {
-		if !p.requestNewlinesForPos(c.Pos) {
+		if !p.requestNewlinesForPos(c.Pos()) {
 			p.requestSpace()
 		}
 		p.printComment(c)
 	}
 	for p.curComment < len(p.comments) {
-		c := p.comments[p.curComment]
-		if !p.requestNewlinesForPos(c.Pos) {
-			p.requestSpace()
-		}
-		p.printComment(c)
+		p.printComment(p.comments[p.curComment])
 		p.curComment++
 	}
 	p.output = append(p.output, '\n')

@@ -15,10 +15,11 @@ before_script:
     - source .travis.fix-fork.sh
 
 script:
+    - ./.travis.gofmt.sh
     - go test ./...
     - mkdir stage
     - cd stage
     - ../bootstrap.bash
     - ./blueprint.bash
-    - diff -us ../build.ninja.in .bootstrap/bootstrap.ninja.in
+    - diff -us ../build.ninja.in .minibootstrap/build.ninja.in
     - ../tests/test.sh

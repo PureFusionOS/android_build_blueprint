@@ -63,9 +63,9 @@ func unpackProperties(propertyDefs []*parser.Property,
 	for name, packedProperty := range propertyMap {
 		result[name] = packedProperty.property
 		if !packedProperty.unpacked {
-			err := &Error{
+			err := &BlueprintError{
 				Err: fmt.Errorf("unrecognized property %q", name),
-				Pos: packedProperty.property.Pos,
+				Pos: packedProperty.property.ColonPos,
 			}
 			errs = append(errs, err)
 		}
@@ -82,20 +82,19 @@ func buildPropertyMap(namePrefix string, propertyDefs []*parser.Property,
 	propertyMap map[string]*packedProperty) (errs []error) {
 
 	for _, propertyDef := range propertyDefs {
-		name := namePrefix + propertyDef.Name.Name
+		name := namePrefix + propertyDef.Name
 		if first, present := propertyMap[name]; present {
 			if first.property == propertyDef {
 				// We've already added this property.
 				continue
 			}
-
-			errs = append(errs, &Error{
+			errs = append(errs, &BlueprintError{
 				Err: fmt.Errorf("property %q already defined", name),
-				Pos: propertyDef.Pos,
+				Pos: propertyDef.ColonPos,
 			})
-			errs = append(errs, &Error{
+			errs = append(errs, &BlueprintError{
 				Err: fmt.Errorf("<-- previous definition here"),
-				Pos: first.property.Pos,
+				Pos: first.property.ColonPos,
 			})
 			if len(errs) >= maxErrors {
 				return errs
@@ -129,6 +128,15 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 		fieldValue := structValue.Field(i)
 		field := structType.Field(i)
 
+		// In Go 1.7, runtime-created structs are unexported, so it's not
+		// possible to create an exported anonymous field with a generated
+		// type. So workaround this by special-casing "BlueprintEmbed" to
+		// behave like an anonymous field for structure unpacking.
+		if field.Name == "BlueprintEmbed" {
+			field.Name = ""
+			field.Anonymous = true
+		}
+
 		if field.PkgPath != "" {
 			// This is an unexported field, so just skip it.
 			continue
@@ -140,8 +148,15 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 			panic(fmt.Errorf("field %s is not settable", propertyName))
 		}
 
+		// Get the property value if it was specified.
+		packedProperty, propertyIsSet := propertyMap[propertyName]
+
+		origFieldValue := fieldValue
+
 		// To make testing easier we validate the struct field's type regardless
 		// of whether or not the property was specified in the parsed string.
+		// TODO(ccross): we don't validate types inside nil struct pointers
+		// Move type validation to a function that runs on each factory once
 		switch kind := fieldValue.Kind(); kind {
 		case reflect.Bool, reflect.String, reflect.Struct:
 			// Do nothing
@@ -163,8 +178,12 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 		case reflect.Ptr:
 			switch ptrKind := fieldValue.Type().Elem().Kind(); ptrKind {
 			case reflect.Struct:
-				if fieldValue.IsNil() {
-					panic(fmt.Errorf("field %s contains a nil pointer", propertyName))
+				if fieldValue.IsNil() && (propertyIsSet || field.Anonymous) {
+					// Instantiate nil struct pointers
+					// Set into origFieldValue in case it was an interface, in which case
+					// fieldValue points to the unsettable pointer inside the interface
+					fieldValue = reflect.New(fieldValue.Type().Elem())
+					origFieldValue.Set(fieldValue)
 				}
 				fieldValue = fieldValue.Elem()
 			case reflect.Bool, reflect.String:
@@ -188,9 +207,7 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 			continue
 		}
 
-		// Get the property value if it was specified.
-		packedProperty, ok := propertyMap[propertyName]
-		if !ok {
+		if !propertyIsSet {
 			// This property wasn't specified.
 			continue
 		}
@@ -199,9 +216,9 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 
 		if proptools.HasTag(field, "blueprint", "mutated") {
 			errs = append(errs,
-				&Error{
+				&BlueprintError{
 					Err: fmt.Errorf("mutated field %s cannot be set in a Blueprint file", propertyName),
-					Pos: packedProperty.property.Pos,
+					Pos: packedProperty.property.ColonPos,
 				})
 			if len(errs) >= maxErrors {
 				return errs
@@ -211,9 +228,9 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 
 		if filterKey != "" && !proptools.HasTag(field, filterKey, filterValue) {
 			errs = append(errs,
-				&Error{
+				&BlueprintError{
 					Err: fmt.Errorf("filtered field %s cannot be set in a Blueprint file", propertyName),
-					Pos: packedProperty.property.Pos,
+					Pos: packedProperty.property.ColonPos,
 				})
 			if len(errs) >= maxErrors {
 				return errs
@@ -276,47 +293,49 @@ func unpackStructValue(namePrefix string, structValue reflect.Value,
 }
 
 func unpackBool(boolValue reflect.Value, property *parser.Property) []error {
-	if property.Value.Type != parser.Bool {
+	b, ok := property.Value.Eval().(*parser.Bool)
+	if !ok {
 		return []error{
-			fmt.Errorf("%s: can't assign %s value to %s property %q",
-				property.Value.Pos, property.Value.Type, parser.Bool,
-				property.Name),
+			fmt.Errorf("%s: can't assign %s value to bool property %q",
+				property.Value.Pos(), property.Value.Type(), property.Name),
 		}
 	}
-	boolValue.SetBool(property.Value.BoolValue)
+	boolValue.SetBool(b.Value)
 	return nil
 }
 
 func unpackString(stringValue reflect.Value,
 	property *parser.Property) []error {
 
-	if property.Value.Type != parser.String {
+	s, ok := property.Value.Eval().(*parser.String)
+	if !ok {
 		return []error{
-			fmt.Errorf("%s: can't assign %s value to %s property %q",
-				property.Value.Pos, property.Value.Type, parser.String,
-				property.Name),
+			fmt.Errorf("%s: can't assign %s value to string property %q",
+				property.Value.Pos(), property.Value.Type(), property.Name),
 		}
 	}
-	stringValue.SetString(property.Value.StringValue)
+	stringValue.SetString(s.Value)
 	return nil
 }
 
 func unpackSlice(sliceValue reflect.Value, property *parser.Property) []error {
-	if property.Value.Type != parser.List {
+
+	l, ok := property.Value.Eval().(*parser.List)
+	if !ok {
 		return []error{
-			fmt.Errorf("%s: can't assign %s value to %s property %q",
-				property.Value.Pos, property.Value.Type, parser.List,
-				property.Name),
+			fmt.Errorf("%s: can't assign %s value to list property %q",
+				property.Value.Pos(), property.Value.Type(), property.Name),
 		}
 	}
 
-	list := []string{}
-	for _, value := range property.Value.ListValue {
-		if value.Type != parser.String {
+	list := make([]string, len(l.Values))
+	for i, value := range l.Values {
+		s, ok := value.Eval().(*parser.String)
+		if !ok {
 			// The parser should not produce this.
-			panic("non-string value found in list")
+			panic(fmt.Errorf("non-string value %q found in list", value))
 		}
-		list = append(list, value.StringValue)
+		list[i] = s.Value
 	}
 
 	sliceValue.Set(reflect.ValueOf(list))
@@ -327,15 +346,15 @@ func unpackStruct(namePrefix string, structValue reflect.Value,
 	property *parser.Property, propertyMap map[string]*packedProperty,
 	filterKey, filterValue string) []error {
 
-	if property.Value.Type != parser.Map {
+	m, ok := property.Value.Eval().(*parser.Map)
+	if !ok {
 		return []error{
-			fmt.Errorf("%s: can't assign %s value to %s property %q",
-				property.Value.Pos, property.Value.Type, parser.Map,
-				property.Name),
+			fmt.Errorf("%s: can't assign %s value to map property %q",
+				property.Value.Pos(), property.Value.Type(), property.Name),
 		}
 	}
 
-	errs := buildPropertyMap(namePrefix, property.Value.MapValue, propertyMap)
+	errs := buildPropertyMap(namePrefix, m.Properties, propertyMap)
 	if len(errs) > 0 {
 		return errs
 	}
