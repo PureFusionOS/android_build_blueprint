@@ -128,6 +128,12 @@ type BaseModuleContext interface {
 	PropertyErrorf(property, fmt string, args ...interface{})
 	Failed() bool
 
+	// GlobWithDeps returns a list of files that match the specified pattern but do not match any
+	// of the patterns in excludes.  It also adds efficient dependencies to rerun the primary
+	// builder whenever a file matching the pattern as added or removed, without rerunning if a
+	// file that does not match the pattern is added to a searched directory.
+	GlobWithDeps(pattern string, excludes []string) ([]string, error)
+
 	moduleInfo() *moduleInfo
 	error(err error)
 }
@@ -140,6 +146,9 @@ type ModuleContext interface {
 	OtherModuleName(m Module) string
 	OtherModuleErrorf(m Module, fmt string, args ...interface{})
 	OtherModuleDependencyTag(m Module) DependencyTag
+
+	GetDirectDepWithTag(name string, tag DependencyTag) Module
+	GetDirectDep(name string) (Module, DependencyTag)
 
 	VisitDirectDeps(visit func(Module))
 	VisitDirectDepsIf(pred func(Module) bool, visit func(Module))
@@ -246,6 +255,11 @@ func (d *baseModuleContext) Failed() bool {
 	return len(d.errs) > 0
 }
 
+func (d *baseModuleContext) GlobWithDeps(pattern string,
+	excludes []string) ([]string, error) {
+	return d.context.glob(pattern, excludes)
+}
+
 var _ ModuleContext = (*moduleContext)(nil)
 
 type moduleContext struct {
@@ -283,6 +297,34 @@ func (m *baseModuleContext) OtherModuleDependencyTag(logicModule Module) Depende
 	for _, dep := range m.visitingParent.directDeps {
 		if dep.module.logicModule == logicModule {
 			return dep.tag
+		}
+	}
+
+	return nil
+}
+
+// GetDirectDep returns the Module and DependencyTag for the direct dependency with the specified
+// name, or nil if none exists.
+func (m *baseModuleContext) GetDirectDep(name string) (Module, DependencyTag) {
+	for _, dep := range m.module.directDeps {
+		if dep.module.Name() == name {
+			return dep.module.logicModule, dep.tag
+		}
+	}
+
+	return nil, nil
+}
+
+// GetDirectDepWithTag returns the Module the direct dependency with the specified name, or nil if
+// none exists.  It panics if the dependency does not have the specified tag.
+func (m *baseModuleContext) GetDirectDepWithTag(name string, tag DependencyTag) Module {
+	for _, dep := range m.module.directDeps {
+		if dep.module.Name() == name {
+			if dep.tag != tag {
+				panic(fmt.Errorf("found dependency %q with tag %#v, expected tag %#v",
+					dep.module, dep.tag, tag))
+			}
+			return dep.module.logicModule
 		}
 	}
 
@@ -450,6 +492,8 @@ type mutatorContext struct {
 	baseModuleContext
 	name        string
 	reverseDeps []reverseDep
+	rename      []rename
+	replace     []replace
 	newModules  []*moduleInfo
 }
 
@@ -474,6 +518,9 @@ type TopDownMutatorContext interface {
 	OtherModuleName(m Module) string
 	OtherModuleErrorf(m Module, fmt string, args ...interface{})
 	OtherModuleDependencyTag(m Module) DependencyTag
+
+	GetDirectDepWithTag(name string, tag DependencyTag) Module
+	GetDirectDep(name string) (Module, DependencyTag)
 
 	VisitDirectDeps(visit func(Module))
 	VisitDirectDepsIf(pred func(Module) bool, visit func(Module))
@@ -658,7 +705,14 @@ func (mctx *mutatorContext) AddInterVariantDependency(tag DependencyTag, from, t
 // specified name with the current variant of this module.  Replacements don't take effect until
 // after the mutator pass is finished.
 func (mctx *mutatorContext) ReplaceDependencies(name string) {
-	mctx.context.replaceDependencies(mctx.module, name)
+	target := mctx.context.moduleMatchingVariant(mctx.module, name)
+
+	if target == nil {
+		panic(fmt.Errorf("ReplaceDependencies could not find identical variant %q for module %q",
+			mctx.module.variantName, name))
+	}
+
+	mctx.replace = append(mctx.replace, replace{target, mctx.module})
 }
 
 func (mctx *mutatorContext) OtherModuleExists(name string) bool {
@@ -668,7 +722,7 @@ func (mctx *mutatorContext) OtherModuleExists(name string) bool {
 // Rename all variants of a module.  The new name is not visible to calls to ModuleName,
 // AddDependency or OtherModuleName until after this mutator pass is complete.
 func (mctx *mutatorContext) Rename(name string) {
-	mctx.context.rename(mctx.module.group, name)
+	mctx.rename = append(mctx.rename, rename{mctx.module.group, name})
 }
 
 // SimpleName is an embeddable object to implement the ModuleContext.Name method using a property

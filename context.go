@@ -25,12 +25,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"text/scanner"
 	"text/template"
 
 	"github.com/google/blueprint/parser"
-	"github.com/google/blueprint/pathtools"
 	"github.com/google/blueprint/proptools"
 )
 
@@ -101,9 +101,8 @@ type Context struct {
 	// set lazily by sortedModuleNames
 	cachedSortedModuleNames []string
 
-	// List of pending renames and replacements to apply after the mutator pass
-	renames      []rename
-	replacements []replace
+	globs    map[string]GlobPath
+	globLock sync.Mutex
 
 	fs fileSystem
 }
@@ -270,6 +269,7 @@ func NewContext() *Context {
 		moduleNames:      make(map[string]*moduleGroup),
 		moduleInfo:       make(map[Module]*moduleInfo),
 		moduleNinjaNames: make(map[string]*moduleGroup),
+		globs:            make(map[string]GlobPath),
 		fs:               fs,
 	}
 
@@ -524,12 +524,11 @@ func (c *Context) SetAllowMissingDependencies(allowMissingDependencies bool) {
 // filename specifies the path to the Blueprints file.  These paths are used for
 // error reporting and for determining the module's directory.
 func (c *Context) parse(rootDir, filename string, r io.Reader,
-	scope *parser.Scope) (file *parser.File, subBlueprints []stringAndScope, deps []string,
-	errs []error) {
+	scope *parser.Scope) (file *parser.File, subBlueprints []stringAndScope, errs []error) {
 
 	relBlueprintsFile, err := filepath.Rel(rootDir, filename)
 	if err != nil {
-		return nil, nil, nil, []error{err}
+		return nil, nil, []error{err}
 	}
 
 	scope = parser.NewScope(scope)
@@ -550,7 +549,7 @@ func (c *Context) parse(rootDir, filename string, r io.Reader,
 
 		// If there were any parse errors don't bother trying to interpret the
 		// result.
-		return nil, nil, nil, errs
+		return nil, nil, errs
 	}
 	file.Name = relBlueprintsFile
 
@@ -570,24 +569,28 @@ func (c *Context) parse(rootDir, filename string, r io.Reader,
 	}
 
 	subBlueprintsName, _, err := getStringFromScope(scope, "subname")
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	if subBlueprintsName == "" {
+		subBlueprintsName = "Blueprints"
+	}
 
 	var blueprints []string
 
-	newBlueprints, newDeps, newErrs := c.findBuildBlueprints(filepath.Dir(filename), build, buildPos)
+	newBlueprints, newErrs := c.findBuildBlueprints(filepath.Dir(filename), build, buildPos)
 	blueprints = append(blueprints, newBlueprints...)
-	deps = append(deps, newDeps...)
 	errs = append(errs, newErrs...)
 
-	newBlueprints, newDeps, newErrs = c.findSubdirBlueprints(filepath.Dir(filename), subdirs, subdirsPos,
+	newBlueprints, newErrs = c.findSubdirBlueprints(filepath.Dir(filename), subdirs, subdirsPos,
 		subBlueprintsName, false)
 	blueprints = append(blueprints, newBlueprints...)
-	deps = append(deps, newDeps...)
 	errs = append(errs, newErrs...)
 
-	newBlueprints, newDeps, newErrs = c.findSubdirBlueprints(filepath.Dir(filename), optionalSubdirs,
+	newBlueprints, newErrs = c.findSubdirBlueprints(filepath.Dir(filename), optionalSubdirs,
 		optionalSubdirsPos, subBlueprintsName, true)
 	blueprints = append(blueprints, newBlueprints...)
-	deps = append(deps, newDeps...)
 	errs = append(errs, newErrs...)
 
 	subBlueprintsAndScope := make([]stringAndScope, len(blueprints))
@@ -595,7 +598,7 @@ func (c *Context) parse(rootDir, filename string, r io.Reader,
 		subBlueprintsAndScope[i] = stringAndScope{b, scope}
 	}
 
-	return file, subBlueprintsAndScope, deps, errs
+	return file, subBlueprintsAndScope, errs
 }
 
 type stringAndScope struct {
@@ -790,7 +793,7 @@ func (c *Context) parseBlueprintsFile(filename string, scope *parser.Scope, root
 		}
 	}()
 
-	file, subBlueprints, deps, errs := c.parse(rootDir, filename, f, scope)
+	file, subBlueprints, errs := c.parse(rootDir, filename, f, scope)
 	if len(errs) > 0 {
 		errsCh <- errs
 	} else {
@@ -799,22 +802,26 @@ func (c *Context) parseBlueprintsFile(filename string, scope *parser.Scope, root
 
 	for _, b := range subBlueprints {
 		blueprintsCh <- b
-	}
-
-	for _, d := range deps {
-		depsCh <- d
+		depsCh <- b.string
 	}
 }
 
 func (c *Context) findBuildBlueprints(dir string, build []string,
-	buildPos scanner.Position) (blueprints, deps []string, errs []error) {
+	buildPos scanner.Position) ([]string, []error) {
+
+	var blueprints []string
+	var errs []error
 
 	for _, file := range build {
-		globPattern := filepath.Join(dir, file)
-		matches, matchedDirs, err := pathtools.Glob(globPattern)
+		pattern := filepath.Join(dir, file)
+		var matches []string
+		var err error
+
+		matches, err = c.glob(pattern, nil)
+
 		if err != nil {
 			errs = append(errs, &BlueprintError{
-				Err: fmt.Errorf("%q: %s", globPattern, err.Error()),
+				Err: fmt.Errorf("%q: %s", pattern, err.Error()),
 				Pos: buildPos,
 			})
 			continue
@@ -822,47 +829,35 @@ func (c *Context) findBuildBlueprints(dir string, build []string,
 
 		if len(matches) == 0 {
 			errs = append(errs, &BlueprintError{
-				Err: fmt.Errorf("%q: not found", globPattern),
+				Err: fmt.Errorf("%q: not found", pattern),
 				Pos: buildPos,
 			})
 		}
 
-		// Depend on all searched directories so we pick up future changes.
-		deps = append(deps, matchedDirs...)
-
 		for _, foundBlueprints := range matches {
-			exists, dir, err := c.fs.Exists(foundBlueprints)
-			if err != nil {
-				errs = append(errs, err)
-			} else if !exists {
-				errs = append(errs, &BlueprintError{
-					Err: fmt.Errorf("%q not found", foundBlueprints),
-				})
-				continue
-			} else if dir {
-				errs = append(errs, &BlueprintError{
-					Err: fmt.Errorf("%q is a directory", foundBlueprints),
-				})
-				continue
-			}
-
 			blueprints = append(blueprints, foundBlueprints)
-			deps = append(deps, foundBlueprints)
 		}
 	}
 
-	return blueprints, deps, errs
+	return blueprints, errs
 }
 
 func (c *Context) findSubdirBlueprints(dir string, subdirs []string, subdirsPos scanner.Position,
-	subBlueprintsName string, optional bool) (blueprints, deps []string, errs []error) {
+	subBlueprintsName string, optional bool) ([]string, []error) {
+
+	var blueprints []string
+	var errs []error
 
 	for _, subdir := range subdirs {
-		globPattern := filepath.Join(dir, subdir)
-		matches, matchedDirs, err := pathtools.Glob(globPattern)
+		pattern := filepath.Join(dir, subdir, subBlueprintsName)
+		var matches []string
+		var err error
+
+		matches, err = c.glob(pattern, nil)
+
 		if err != nil {
 			errs = append(errs, &BlueprintError{
-				Err: fmt.Errorf("%q: %s", globPattern, err.Error()),
+				Err: fmt.Errorf("%q: %s", pattern, err.Error()),
 				Pos: subdirsPos,
 			})
 			continue
@@ -870,56 +865,17 @@ func (c *Context) findSubdirBlueprints(dir string, subdirs []string, subdirsPos 
 
 		if len(matches) == 0 && !optional {
 			errs = append(errs, &BlueprintError{
-				Err: fmt.Errorf("%q: not found", globPattern),
+				Err: fmt.Errorf("%q: not found", pattern),
 				Pos: subdirsPos,
 			})
 		}
 
-		// Depend on all searched directories so we pick up future changes.
-		deps = append(deps, matchedDirs...)
-
-		for _, foundSubdir := range matches {
-			exists, dir, subdirStatErr := c.fs.Exists(foundSubdir)
-			if subdirStatErr != nil {
-				errs = append(errs, subdirStatErr)
-				continue
-			}
-
-			// Skip files
-			if !dir {
-				continue
-			}
-
-			var subBlueprints string
-			if subBlueprintsName != "" {
-				subBlueprints = filepath.Join(foundSubdir, subBlueprintsName)
-				exists, _, err = c.fs.Exists(subBlueprints)
-			}
-
-			if err == nil && (!exists || subBlueprints == "") {
-				subBlueprints = filepath.Join(foundSubdir, "Blueprints")
-				exists, _, err = c.fs.Exists(subBlueprints)
-			}
-
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-
-			if !exists {
-				// There is no Blueprints file in this subdirectory.  We
-				// need to add the directory to the list of dependencies
-				// so that if someone adds a Blueprints file in the
-				// future we'll pick it up.
-				deps = append(deps, foundSubdir)
-			} else {
-				deps = append(deps, subBlueprints)
-				blueprints = append(blueprints, subBlueprints)
-			}
+		for _, subBlueprints := range matches {
+			blueprints = append(blueprints, subBlueprints)
 		}
 	}
 
-	return blueprints, deps, errs
+	return blueprints, errs
 }
 
 func getLocalStringListFromScope(scope *parser.Scope, v string) ([]string, scanner.Position, error) {
@@ -1746,16 +1702,22 @@ func (c *Context) runMutator(config interface{}, mutator *mutatorInfo,
 		newModuleInfo[k] = v
 	}
 
+	type globalStateChange struct {
+		reverse []reverseDep
+		rename  []rename
+		replace []replace
+	}
+
 	reverseDeps := make(map[*moduleInfo][]depInfo)
+	var rename []rename
+	var replace []replace
 
 	errsCh := make(chan []error)
-	reverseDepsCh := make(chan []reverseDep)
+	globalStateCh := make(chan globalStateChange)
 	newModulesCh := make(chan []*moduleInfo)
 	done := make(chan bool)
 
 	c.depsModified = 0
-	c.renames = nil
-	c.replacements = nil
 
 	visit := func(module *moduleInfo) bool {
 		if module.splitModules != nil {
@@ -1795,8 +1757,12 @@ func (c *Context) runMutator(config interface{}, mutator *mutatorInfo,
 			newModulesCh <- mctx.newModules
 		}
 
-		if len(mctx.reverseDeps) > 0 {
-			reverseDepsCh <- mctx.reverseDeps
+		if len(mctx.reverseDeps) > 0 || len(mctx.replace) > 0 || len(mctx.rename) > 0 {
+			globalStateCh <- globalStateChange{
+				reverse: mctx.reverseDeps,
+				replace: mctx.replace,
+				rename:  mctx.rename,
+			}
 		}
 
 		return false
@@ -1808,10 +1774,12 @@ func (c *Context) runMutator(config interface{}, mutator *mutatorInfo,
 			select {
 			case newErrs := <-errsCh:
 				errs = append(errs, newErrs...)
-			case newReverseDeps := <-reverseDepsCh:
-				for _, r := range newReverseDeps {
+			case globalStateChange := <-globalStateCh:
+				for _, r := range globalStateChange.reverse {
 					reverseDeps[r.module] = append(reverseDeps[r.module], r.dep)
 				}
+				replace = append(replace, globalStateChange.replace...)
+				rename = append(rename, globalStateChange.rename...)
 			case newModules := <-newModulesCh:
 				for _, m := range newModules {
 					newModuleInfo[m.logicModule] = m
@@ -1861,7 +1829,12 @@ func (c *Context) runMutator(config interface{}, mutator *mutatorInfo,
 		c.depsModified++
 	}
 
-	errs = c.handleRenamesAndReplacements()
+	errs = c.handleRenames(rename)
+	if len(errs) > 0 {
+		return errs
+	}
+
+	errs = c.handleReplacements(replace)
 	if len(errs) > 0 {
 		return errs
 	}
@@ -2164,36 +2137,25 @@ type rename struct {
 	name  string
 }
 
-func (c *Context) rename(group *moduleGroup, name string) {
-	c.renames = append(c.renames, rename{group, name})
-}
-
-func (c *Context) replaceDependencies(module *moduleInfo, name string) {
+func (c *Context) moduleMatchingVariant(module *moduleInfo, name string) *moduleInfo {
 	targets := c.modulesFromName(name)
 
 	if targets == nil {
-		panic(fmt.Errorf("ReplaceDependencies called with non-existant name %q", name))
+		return nil
 	}
 
-	var target *moduleInfo
 	for _, m := range targets {
 		if module.variantName == m.variantName {
-			target = m
-			break
+			return m
 		}
 	}
 
-	if target == nil {
-		panic(fmt.Errorf("ReplaceDependencies could not find identical variant %q for module %q",
-			module.variantName, name))
-	}
-
-	c.replacements = append(c.replacements, replace{target, module})
+	return nil
 }
 
-func (c *Context) handleRenamesAndReplacements() []error {
+func (c *Context) handleRenames(renames []rename) []error {
 	var errs []error
-	for _, rename := range c.renames {
+	for _, rename := range renames {
 		group, name := rename.group, rename.name
 		if name == group.name {
 			continue
@@ -2220,7 +2182,12 @@ func (c *Context) handleRenamesAndReplacements() []error {
 		group.name = name
 	}
 
-	for _, replace := range c.replacements {
+	return errs
+}
+
+func (c *Context) handleReplacements(replacements []replace) []error {
+	var errs []error
+	for _, replace := range replacements {
 		for _, m := range replace.from.reverseDeps {
 			for i, d := range m.directDeps {
 				if d.module == replace.from {
@@ -2231,6 +2198,7 @@ func (c *Context) handleRenamesAndReplacements() []error {
 
 		atomic.AddUint32(&c.depsModified, 1)
 	}
+
 	return errs
 }
 
